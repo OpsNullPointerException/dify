@@ -43,30 +43,39 @@ class Jieba(BaseKeyword):
             return self
 
     def add_texts(self, texts: list[Document], **kwargs):
+        """将文档添加到关键词索引：支持用户提供的关键词或自动提取"""
         lock_name = f"keyword_indexing_lock_{self.dataset.id}"
         with redis_client.lock(lock_name, timeout=600):
             keyword_table_handler = JiebaKeywordTableHandler()
 
             keyword_table = self._get_dataset_keyword_table()
+            # 获取用户为每个文档提供的关键词列表（可选）
             keywords_list = kwargs.get("keywords_list")
+            
             for i in range(len(texts)):
                 text = texts[i]
+                # 决定使用用户关键词还是自动提取
                 if keywords_list:
-                    keywords = keywords_list[i]
+                    keywords = keywords_list[i]  # 获取当前文档的用户关键词
                     if not keywords:
+                        # 用户未提供关键词，使用jieba自动提取
                         keywords = keyword_table_handler.extract_keywords(
                             text.page_content, self._config.max_keywords_per_chunk
                         )
                 else:
+                    # 没有用户关键词列表，全部使用jieba自动提取
                     keywords = keyword_table_handler.extract_keywords(
                         text.page_content, self._config.max_keywords_per_chunk
                     )
+                
+                # 更新关键词索引表：建立关键词与文档的映射关系
                 if text.metadata is not None:
                     self._update_segment_keywords(self.dataset.id, text.metadata["doc_id"], list(keywords))
                     keyword_table = self._add_text_to_keyword_table(
                         keyword_table or {}, text.metadata["doc_id"], list(keywords)
                     )
 
+            # 保存更新后的关键词表到存储
             self._save_dataset_keyword_table(keyword_table)
 
     def text_exists(self, id: str) -> bool:

@@ -180,19 +180,28 @@ class Vector:
                 raise ValueError(f"Vector store {vector_type} is not supported.")
 
     def create(self, texts: Optional[list] = None, **kwargs):
+        """创建向量索引：将文档转换为向量并存储到向量数据库"""
         if texts:
             start = time.time()
             logger.info("start embedding %s texts %s", len(texts), start)
+            
+            # 批处理配置：每批处理1000个文档（避免内存溢出和API限制）
             batch_size = 1000
             total_batches = len(texts) + batch_size - 1
+            
+            # 分批处理文档：防止大量文档一次性处理导致资源耗尽
             for i in range(0, len(texts), batch_size):
                 batch = texts[i : i + batch_size]
                 batch_start = time.time()
                 logger.info("Processing batch %s/%s (%s texts)", i // batch_size + 1, total_batches, len(batch))
+                
+                # 核心步骤：调用嵌入模型将文本转换为向量
                 batch_embeddings = self._embeddings.embed_documents([document.page_content for document in batch])
                 logger.info(
                     "Embedding batch %s/%s took %s s", i // batch_size + 1, total_batches, time.time() - batch_start
                 )
+                
+                # 将向量和原文档一起存储到向量数据库
                 self._vector_processor.create(texts=batch, embeddings=batch_embeddings, **kwargs)
             logger.info("Embedding %s texts took %s s", len(texts), time.time() - start)
 

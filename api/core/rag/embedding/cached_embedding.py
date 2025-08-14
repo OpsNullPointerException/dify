@@ -25,12 +25,16 @@ class CacheEmbedding(Embeddings):
         self._user = user
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        """Embed search docs in batches of 10."""
-        # use doc embedding cache or store if not exists
+        """批量生成文档向量：基于数据库持久化存储，避免重复计算相同文本的向量"""
+        # 初始化结果数组，预设为None便于后续填充
         text_embeddings: list[Any] = [None for _ in range(len(texts))]
         embedding_queue_indices = []
+        
+        # 步骤1：检查数据库存储，找出需要新计算的文本
         for i, text in enumerate(texts):
-            hash = helper.generate_text_hash(text)
+            # 基于文本内容生成SHA256哈希值作为唯一标识
+            hash = helper.generate_text_hash(text)  # SHA256(text + "None")
+            # 查询数据库中是否已有该文本的向量记录
             embedding = (
                 db.session.query(Embedding)
                 .filter_by(
@@ -39,13 +43,18 @@ class CacheEmbedding(Embeddings):
                 .first()
             )
             if embedding:
+                # 数据库命中：直接使用已存储的向量
                 text_embeddings[i] = embedding.get_embedding()
             else:
+                # 数据库未命中：标记为需要计算
                 embedding_queue_indices.append(i)
+                
+        # 步骤2：批量计算未缓存的文本向量
         if embedding_queue_indices:
             embedding_queue_texts = [texts[i] for i in embedding_queue_indices]
             embedding_queue_embeddings = []
             try:
+                # 获取模型支持的最大批处理大小
                 model_type_instance = cast(TextEmbeddingModel, self._model_instance.model_type_instance)
                 model_schema = model_type_instance.get_model_schema(
                     self._model_instance.model, self._model_instance.credentials
@@ -55,20 +64,23 @@ class CacheEmbedding(Embeddings):
                     if model_schema and ModelPropertyKey.MAX_CHUNKS in model_schema.model_properties
                     else 1
                 )
+                
+                # 按模型限制分批调用嵌入API
                 for i in range(0, len(embedding_queue_texts), max_chunks):
                     batch_texts = embedding_queue_texts[i : i + max_chunks]
 
+                    # 调用嵌入模型生成向量
                     embedding_result = self._model_instance.invoke_text_embedding(
                         texts=batch_texts, user=self._user, input_type=EmbeddingInputType.DOCUMENT
                     )
 
+                    # 处理每个向量：归一化并验证有效性
                     for vector in embedding_result.embeddings:
                         try:
-                            # FIXME: type ignore for numpy here
+                            # 向量归一化：转换为单位向量，提高相似度计算精度
                             normalized_embedding = (vector / np.linalg.norm(vector)).tolist()  # type: ignore
-                            # stackoverflow best way: https://stackoverflow.com/questions/20319813/how-to-check-list-containing-nan
+                            # 检查向量是否包含NaN值（无效计算结果）
                             if np.isnan(normalized_embedding).any():
-                                # for issue #11827  float values are not json compliant
                                 logger.warning("Normalized embedding is nan: %s", normalized_embedding)
                                 continue
                             embedding_queue_embeddings.append(normalized_embedding)
@@ -76,12 +88,15 @@ class CacheEmbedding(Embeddings):
                             db.session.rollback()
                         except Exception:
                             logging.exception("Failed transform embedding")
+                            
+                # 步骤3：保存新计算的向量到数据库
                 cache_embeddings = []
                 try:
                     for i, n_embedding in zip(embedding_queue_indices, embedding_queue_embeddings):
                         text_embeddings[i] = n_embedding
                         hash = helper.generate_text_hash(texts[i])
                         if hash not in cache_embeddings:
+                            # 创建数据库记录：持久化存储向量数据
                             embedding_cache = Embedding(
                                 model_name=self._model_instance.model,
                                 hash=hash,

@@ -66,17 +66,19 @@ class IndexingRunner:
                     raise ValueError("no process rule found")
                 index_type = dataset_document.doc_form
                 index_processor = IndexProcessorFactory(index_type).init_index_processor()
-                # extract
+                
+                # 阶段1: 提取文档内容
                 text_docs = self._extract(index_processor, dataset_document, processing_rule.to_dict())
 
-                # transform
+                # 阶段2: 转换和分块处理
                 documents = self._transform(
                     index_processor, dataset, text_docs, dataset_document.doc_language, processing_rule.to_dict()
                 )
-                # save segment
+                
+                # 阶段3: 保存分段到数据库
                 self._load_segments(dataset, dataset_document, documents)
 
-                # load
+                # 阶段4: 加载到向量/关键词索引
                 self._load(
                     index_processor=index_processor,
                     dataset=dataset,
@@ -336,16 +338,19 @@ class IndexingRunner:
     def _extract(
         self, index_processor: BaseIndexProcessor, dataset_document: DatasetDocument, process_rule: dict
     ) -> list[Document]:
-        # load file
+        # 检查数据源类型是否支持
         if dataset_document.data_source_type not in {"upload_file", "notion_import", "website_crawl"}:
             return []
 
         data_source_info = dataset_document.data_source_info_dict
         text_docs = []
+        
+        # 处理文件上传类型数据源
         if dataset_document.data_source_type == "upload_file":
             if not data_source_info or "upload_file_id" not in data_source_info:
                 raise ValueError("no upload file found")
 
+            # 从数据库获取上传文件详情
             file_detail = (
                 db.session.query(UploadFile).where(UploadFile.id == data_source_info["upload_file_id"]).one_or_none()
             )
@@ -354,7 +359,10 @@ class IndexingRunner:
                 extract_setting = ExtractSetting(
                     datasource_type="upload_file", upload_file=file_detail, document_model=dataset_document.doc_form
                 )
+                # 提取文件内容为文档
                 text_docs = index_processor.extract(extract_setting, process_rule_mode=process_rule["mode"])
+                
+        # 处理 Notion 导入类型数据源
         elif dataset_document.data_source_type == "notion_import":
             if (
                 not data_source_info
@@ -373,7 +381,10 @@ class IndexingRunner:
                 },
                 document_model=dataset_document.doc_form,
             )
+            # 从 Notion 提取页面内容
             text_docs = index_processor.extract(extract_setting, process_rule_mode=process_rule["mode"])
+            
+        # 处理网站爬取类型数据源
         elif dataset_document.data_source_type == "website_crawl":
             if (
                 not data_source_info
@@ -394,8 +405,10 @@ class IndexingRunner:
                 },
                 document_model=dataset_document.doc_form,
             )
+            # 从网站爬取内容
             text_docs = index_processor.extract(extract_setting, process_rule_mode=process_rule["mode"])
-        # update document status to splitting
+            
+        # 更新文档状态为分割中，记录字数和解析完成时间
         self._update_document_index_status(
             document_id=dataset_document.id,
             after_indexing_status="splitting",
@@ -405,7 +418,7 @@ class IndexingRunner:
             },
         )
 
-        # replace doc id to document model id
+        # 替换文档 ID 为数据库中的文档模型 ID
         text_docs = cast(list[Document], text_docs)
         for text_doc in text_docs:
             if text_doc.metadata is not None:
@@ -524,6 +537,7 @@ class IndexingRunner:
         insert index and update document/segment status to completed
         """
 
+        # 高精度索引：获取嵌入模型实例
         embedding_model_instance = None
         if dataset.indexing_technique == "high_quality":
             embedding_model_instance = self.model_manager.get_model_instance(
@@ -536,6 +550,7 @@ class IndexingRunner:
         # chunk nodes by chunk size
         indexing_start_at = time.perf_counter()
         tokens = 0
+        # 经济模式：仅创建关键词索引（异步处理）
         if dataset_document.doc_form != IndexType.PARENT_CHILD_INDEX and dataset.indexing_technique == "economy":
             # create keyword index
             create_keyword_thread = threading.Thread(
@@ -545,6 +560,7 @@ class IndexingRunner:
             create_keyword_thread.start()
 
         max_workers = 10
+        # 高精度模式：并行处理向量嵌入和索引
         if dataset.indexing_technique == "high_quality":
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = []
@@ -598,6 +614,7 @@ class IndexingRunner:
                 raise ValueError("no dataset found")
             keyword = Keyword(dataset)
             keyword.create(documents)
+            # 经济模式：直接更新文档段状态为完成
             if dataset.indexing_technique != "high_quality":
                 document_ids = [document.metadata["doc_id"] for document in documents]
                 db.session.query(DocumentSegment).where(
@@ -627,9 +644,10 @@ class IndexingRunner:
                 page_content_list = [document.page_content for document in chunk_documents]
                 tokens += sum(embedding_model_instance.get_text_embedding_num_tokens(page_content_list))
 
-            # load index
+            # 高精度模式：加载向量索引
             index_processor.load(dataset, chunk_documents, with_keywords=False)
 
+            # 更新文档段状态为完成
             document_ids = [document.metadata["doc_id"] for document in chunk_documents]
             db.session.query(DocumentSegment).where(
                 DocumentSegment.document_id == dataset_document.id,
@@ -692,7 +710,7 @@ class IndexingRunner:
         doc_language: str,
         process_rule: dict,
     ) -> list[Document]:
-        # get embedding model instance
+        # 获取嵌入模型实例（仅高精度索引需要）
         embedding_model_instance = None
         if dataset.indexing_technique == "high_quality":
             if dataset.embedding_model_provider:

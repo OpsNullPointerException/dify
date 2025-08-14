@@ -92,19 +92,27 @@ class ExtractProcessor:
     def extract(
         cls, extract_setting: ExtractSetting, is_automatic: bool = False, file_path: Optional[str] = None
     ) -> list[Document]:
+        # 处理文件上传数据源
         if extract_setting.datasource_type == DatasourceType.FILE.value:
             with tempfile.TemporaryDirectory() as temp_dir:
+                # 下载文件到临时目录
                 if not file_path:
                     assert extract_setting.upload_file is not None, "upload_file is required"
                     upload_file: UploadFile = extract_setting.upload_file
                     suffix = Path(upload_file.key).suffix
                     # FIXME mypy: Cannot determine type of 'tempfile._get_candidate_names' better not use it here
+                    # _get_candidate_names生成随机的临时文件名
                     file_path = f"{temp_dir}/{next(tempfile._get_candidate_names())}{suffix}"  # type: ignore
                     storage.download(upload_file.key, file_path)
+                    
+                # 根据文件扩展名选择对应的提取器
                 input_file = Path(file_path)
                 file_extension = input_file.suffix.lower()
                 etl_type = dify_config.ETL_TYPE
                 extractor: Optional[BaseExtractor] = None
+                
+                # 使用 Unstructured 解析引擎（结构化提取器）
+                # 特点：智能识别文档结构，保留格式信息，支持复杂布局
                 if etl_type == "Unstructured":
                     unstructured_api_url = dify_config.UNSTRUCTURED_API_URL or ""
                     unstructured_api_key = dify_config.UNSTRUCTURED_API_KEY or ""
@@ -114,6 +122,7 @@ class ExtractProcessor:
                     elif file_extension == ".pdf":
                         extractor = PdfExtractor(file_path)
                     elif file_extension in {".md", ".markdown", ".mdx"}:
+                        # Markdown: 自动模式使用 Unstructured，手动模式使用标准解析器
                         extractor = (
                             UnstructuredMarkdownExtractor(file_path, unstructured_api_url, unstructured_api_key)
                             if is_automatic
@@ -142,8 +151,10 @@ class ExtractProcessor:
                     elif file_extension == ".epub":
                         extractor = UnstructuredEpubExtractor(file_path, unstructured_api_url, unstructured_api_key)
                     else:
-                        # txt
+                        # 默认文本提取器
                         extractor = TextExtractor(file_path, autodetect_encoding=True)
+                # 使用标准解析引擎（传统提取器）
+                # 特点：简单文本提取，轻量级处理，快速但可能丢失格式信息
                 else:
                     if file_extension in {".xlsx", ".xls"}:
                         extractor = ExcelExtractor(file_path)
@@ -160,9 +171,10 @@ class ExtractProcessor:
                     elif file_extension == ".epub":
                         extractor = UnstructuredEpubExtractor(file_path)
                     else:
-                        # txt
+                        # 默认文本提取器
                         extractor = TextExtractor(file_path, autodetect_encoding=True)
                 return extractor.extract()
+        # 处理 Notion 数据源
         elif extract_setting.datasource_type == DatasourceType.NOTION.value:
             assert extract_setting.notion_info is not None, "notion_info is required"
             extractor = NotionExtractor(
@@ -173,8 +185,10 @@ class ExtractProcessor:
                 tenant_id=extract_setting.notion_info.tenant_id,
             )
             return extractor.extract()
+        # 处理网站爬取数据源
         elif extract_setting.datasource_type == DatasourceType.WEBSITE.value:
             assert extract_setting.website_info is not None, "website_info is required"
+            # 根据爬虫提供商选择对应的提取器
             if extract_setting.website_info.provider == "firecrawl":
                 extractor = FirecrawlWebExtractor(
                     url=extract_setting.website_info.url,

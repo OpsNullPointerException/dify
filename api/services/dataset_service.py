@@ -1121,11 +1121,13 @@ class DocumentService:
 
             dataset.indexing_technique = knowledge_config.indexing_technique
             if knowledge_config.indexing_technique == "high_quality":
-                model_manager = ModelManager()
+                # 高质量索引需要使用 Embedding 模型进行向量化
+                model_manager = ModelManager()  # 模型管理器，统一管理各种 AI 模型
                 if knowledge_config.embedding_model and knowledge_config.embedding_model_provider:
                     dataset_embedding_model = knowledge_config.embedding_model
                     dataset_embedding_model_provider = knowledge_config.embedding_model_provider
                 else:
+                    # 如果未指定 Embedding 模型，获取租户的默认 Embedding 模型，数据来源：tenant_default_models
                     embedding_model = model_manager.get_default_model_instance(
                         tenant_id=current_user.current_tenant_id, model_type=ModelType.TEXT_EMBEDDING
                     )
@@ -1138,12 +1140,13 @@ class DocumentService:
                 )
                 dataset.collection_binding_id = dataset_collection_binding.id
                 if not dataset.retrieval_model:
+                    # 默认检索配置：使用语义搜索，不启用重排序
                     default_retrieval_model = {
-                        "search_method": RetrievalMethod.SEMANTIC_SEARCH.value,
-                        "reranking_enable": False,
+                        "search_method": RetrievalMethod.SEMANTIC_SEARCH.value,  # 语义搜索方法
+                        "reranking_enable": False,  # 不启用重排序
                         "reranking_model": {"reranking_provider_name": "", "reranking_model_name": ""},
-                        "top_k": 2,
-                        "score_threshold_enabled": False,
+                        "top_k": 2,  # 返回最相关的2个结果
+                        "score_threshold_enabled": False,  # 不启用相似度阈值过滤
                     }
 
                     dataset.retrieval_model = (
@@ -1154,15 +1157,21 @@ class DocumentService:
 
         documents = []
         if knowledge_config.original_document_id:
+            # 如果存在 original_document_id，表示这是文档配置更新操作
+            # 更新处理规则、数据源配置、文档元数据等，不是直接更新内容
+            # 更新后会重置文档状态为 waiting，触发重新处理流程
             document = DocumentService.update_document_with_dataset_id(dataset, knowledge_config, account)
             documents.append(document)
-            batch = document.batch
+            batch = document.batch  # 使用原文档的批次号
         else:
+            # 创建新文档时生成新的批次号
+            # 批次号用于标识同一次上传操作中的所有文档，便于批量管理和追踪
             batch = time.strftime("%Y%m%d%H%M%S") + str(100000 + secrets.randbelow(exclusive_upper_bound=900000))
             # save process rule
             if not dataset_process_rule:
                 process_rule = knowledge_config.process_rule
                 if process_rule:
+                    # hierarchical分层索引
                     if process_rule.mode in ("custom", "hierarchical"):
                         if process_rule.rules:
                             dataset_process_rule = DatasetProcessRule(
@@ -1192,6 +1201,7 @@ class DocumentService:
                     db.session.commit()
             lock_name = f"add_document_lock_dataset_id_{dataset.id}"
             with redis_client.lock(lock_name, timeout=600):
+                #用于表示文档在数据集中的排序位置
                 position = DocumentService.get_documents_position(dataset.id)
                 document_ids = []
                 duplicate_document_ids = []
@@ -1212,7 +1222,7 @@ class DocumentService:
                         data_source_info = {
                             "upload_file_id": file_id,
                         }
-                        # check duplicate
+                        # 检查重复文档：duplicate字段控制是否启用同名文档检测和覆盖更新机制
                         if knowledge_config.duplicate:
                             document = (
                                 db.session.query(Document)
@@ -1226,6 +1236,7 @@ class DocumentService:
                                 .first()
                             )
                             if document:
+                                # 找到同名文档，更新配置而非创建新文档
                                 document.dataset_process_rule_id = dataset_process_rule.id  # type: ignore
                                 document.updated_at = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
                                 document.created_from = created_from
@@ -1233,11 +1244,11 @@ class DocumentService:
                                 document.doc_language = knowledge_config.doc_language
                                 document.data_source_info = json.dumps(data_source_info)
                                 document.batch = batch
-                                document.indexing_status = "waiting"
+                                document.indexing_status = "waiting"  # 重置状态，将重新处理
                                 db.session.add(document)
                                 documents.append(document)
                                 duplicate_document_ids.append(document.id)
-                                continue
+                                continue  # 跳过新建文档流程
                         document = DocumentService.build_document(
                             dataset,
                             dataset_process_rule.id,  # type: ignore
@@ -1366,6 +1377,7 @@ class DocumentService:
                 # trigger async task
                 if document_ids:
                     document_indexing_task.delay(dataset.id, document_ids)
+                # 触发重复文档的重新索引：清理旧索引数据后重新处理
                 if duplicate_document_ids:
                     duplicate_document_indexing_task.delay(dataset.id, duplicate_document_ids)
 
@@ -1538,7 +1550,8 @@ class DocumentService:
         # update document name
         if document_data.name:
             document.name = document_data.name
-        # update document to be waiting
+        # 重置文档状态为等待处理，清空所有处理时间戳
+        # 这会触发重新处理流程：解析 -> 清洗 -> 分块 -> 向量化 -> 索引
         document.indexing_status = "waiting"
         document.completed_at = None
         document.processing_started_at = None
@@ -1556,7 +1569,8 @@ class DocumentService:
             {DocumentSegment.status: "re_segment"}
         )  # type: ignore
         db.session.commit()
-        # trigger async task
+        # 触发异步任务：清理旧索引并重新构建
+        # 这个任务会删除所有旧的分段和向量索引，然后按新配置重新处理文档
         document_indexing_update_task.delay(document.dataset_id, document.id)
         return document
 
@@ -2079,6 +2093,7 @@ class SegmentService:
             )
             pre_segment_data_list = []
             segment_data_list = []
+            # 收集用户为每个文档段落提供的关键词（来自上传时的手动标注）
             keywords_list = []
             position = max_position + 1 if max_position else 1
             for segment_item in segments:
@@ -2120,16 +2135,17 @@ class SegmentService:
                 position += 1
 
                 pre_segment_data_list.append(segment_document)
+                # 检查当前段落是否有用户提供的关键词
                 if "keywords" in segment_item:
-                    keywords_list.append(segment_item["keywords"])
+                    keywords_list.append(segment_item["keywords"])  # 使用用户标注的关键词
                 else:
-                    keywords_list.append(None)
+                    keywords_list.append(None)  # 无关键词，后续将自动提取
             # update document word count
             assert document.word_count is not None
             document.word_count += increment_word_count
             db.session.add(document)
             try:
-                # save vector index
+                # 保存向量索引：将收集的关键词列表传递给向量服务
                 VectorService.create_segments_vector(keywords_list, pre_segment_data_list, dataset, document.doc_form)
             except Exception as e:
                 logging.exception("create segment index failed")
