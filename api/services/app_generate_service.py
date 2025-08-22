@@ -22,6 +22,8 @@ from services.workflow_service import WorkflowService
 
 
 class AppGenerateService:
+    # 系统级日频率限制器：基于Redis Sorted Set实现的滑动窗口限流
+    # 参数：前缀，最大请求数/天，时间窗口(86400秒=24小时)
     system_rate_limiter = RateLimiter("app_daily_rate_limiter", dify_config.APP_DAILY_RATE_LIMIT, 86400)
 
     @classmethod
@@ -42,25 +44,32 @@ class AppGenerateService:
         :param streaming: streaming
         :return:
         """
-        # system level rate limiter
+        # 系统级限流：基于租户的日请求次数限制（仅针对免费用户）
         if dify_config.BILLING_ENABLED:
-            # check if it's free plan
+            # 检查是否为免费套餐
             limit_info = BillingService.get_info(app_model.tenant_id)
             if limit_info["subscription"]["plan"] == "sandbox":
+                # 检查日频率限制：使用tenant_id作为限流维度
                 if cls.system_rate_limiter.is_rate_limited(app_model.tenant_id):
                     raise InvokeRateLimitError(
                         "Rate limit exceeded, please upgrade your plan "
                         f"or your RPD was {dify_config.APP_DAILY_RATE_LIMIT} requests/day"
                     )
+                # 增加请求计数：在Redis Sorted Set中记录当前时间戳
                 cls.system_rate_limiter.increment_rate_limit(app_model.tenant_id)
 
-        # app level rate limiter
+        # 应用级限流：基于应用的并发请求数限制
         max_active_request = AppGenerateService._get_max_active_requests(app_model)
-        rate_limit = RateLimit(app_model.id, max_active_request)
+        rate_limit = RateLimit(app_model.id, max_active_request)  # client_id = app.id
         request_id = RateLimit.gen_request_key()
         try:
+            # 进入并发限流器，获取实际的请求ID
             request_id = rate_limit.enter(request_id)
+            
+            # 根据应用模式分发到不同的生成器
             if app_model.mode == AppMode.COMPLETION.value:
+                # COMPLETION模式：文本生成应用（一问一答，无对话历史）
+                # 适用场景：文本摘要、翻译、内容生成等
                 return rate_limit.generate(
                     CompletionAppGenerator.convert_to_event_stream(
                         CompletionAppGenerator().generate(
@@ -70,6 +79,8 @@ class AppGenerateService:
                     request_id=request_id,
                 )
             elif app_model.mode == AppMode.AGENT_CHAT.value or app_model.is_agent:
+                # AGENT_CHAT模式：智能体对话应用（支持Function Call工具调用）
+                # 适用场景：智能助手、任务执行、API调用等
                 return rate_limit.generate(
                     AgentChatAppGenerator.convert_to_event_stream(
                         AgentChatAppGenerator().generate(
@@ -79,6 +90,8 @@ class AppGenerateService:
                     request_id,
                 )
             elif app_model.mode == AppMode.CHAT.value:
+                # CHAT模式：基础对话应用（简单配置，有对话历史）
+                # 适用场景：客服机器人、简单问答系统等
                 return rate_limit.generate(
                     ChatAppGenerator.convert_to_event_stream(
                         ChatAppGenerator().generate(
@@ -88,6 +101,8 @@ class AppGenerateService:
                     request_id=request_id,
                 )
             elif app_model.mode == AppMode.ADVANCED_CHAT.value:
+                # ADVANCED_CHAT模式：基于工作流的高级对话应用
+                # 适用场景：复杂业务流程、多步骤交互、可视化配置等
                 workflow_id = args.get("workflow_id")
                 workflow = cls._get_workflow(app_model, invoke_from, workflow_id)
                 return rate_limit.generate(
@@ -104,6 +119,8 @@ class AppGenerateService:
                     request_id=request_id,
                 )
             elif app_model.mode == AppMode.WORKFLOW.value:
+                # WORKFLOW模式：纯工作流执行应用（无对话界面）
+                # 适用场景：数据处理、自动化任务、批处理流水线等
                 workflow_id = args.get("workflow_id")
                 workflow = cls._get_workflow(app_model, invoke_from, workflow_id)
                 return rate_limit.generate(

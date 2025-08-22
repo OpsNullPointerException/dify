@@ -25,6 +25,8 @@ class PublishFrom(Enum):
 
 
 class AppQueueManager:
+    """应用队列管理器基类，使用内存队列实现事件流式传输"""
+    
     def __init__(self, task_id: str, user_id: str, invoke_from: InvokeFrom) -> None:
         if not user_id:
             raise ValueError("user is required")
@@ -33,42 +35,39 @@ class AppQueueManager:
         self._user_id = user_id
         self._invoke_from = invoke_from
 
+        # Redis缓存任务归属信息，30分钟过期
         user_prefix = "account" if self._invoke_from in {InvokeFrom.EXPLORE, InvokeFrom.DEBUGGER} else "end-user"
         redis_client.setex(
             AppQueueManager._generate_task_belong_cache_key(self._task_id), 1800, f"{user_prefix}-{self._user_id}"
         )
 
+        # 创建内存队列，用于事件流传输
         q: queue.Queue[WorkflowQueueMessage | MessageQueueMessage | None] = queue.Queue()
-
         self._q = q
 
     def listen(self):
-        """
-        Listen to queue
-        :return:
-        """
-        # wait for APP_MAX_EXECUTION_TIME seconds to stop listen
+        """监听队列并生成事件流，供前端SSE消费"""
         listen_timeout = dify_config.APP_MAX_EXECUTION_TIME
         start_time = time.time()
         last_ping_time: int | float = 0
         while True:
             try:
+                # 阻塞获取队列消息，1秒超时
                 message = self._q.get(timeout=1)
                 if message is None:
                     break
-
                 yield message
             except queue.Empty:
                 continue
             finally:
                 elapsed_time = time.time() - start_time
+                # 超时或被停止时发送停止信号
                 if elapsed_time >= listen_timeout or self._is_stopped():
-                    # publish two messages to make sure the client can receive the stop signal
-                    # and stop listening after the stop signal processed
                     self.publish(
                         QueueStopEvent(stopped_by=QueueStopEvent.StopBy.USER_MANUAL), PublishFrom.TASK_PIPELINE
                     )
 
+                # 每10秒发送心跳信号
                 if elapsed_time // 10 > last_ping_time:
                     self.publish(QueuePingEvent(), PublishFrom.TASK_PIPELINE)
                     last_ping_time = elapsed_time // 10
@@ -90,13 +89,8 @@ class AppQueueManager:
         self.publish(QueueErrorEvent(error=e), pub_from)
 
     def publish(self, event: AppQueueEvent, pub_from: PublishFrom) -> None:
-        """
-        Publish event to queue
-        :param event:
-        :param pub_from:
-        :return:
-        """
-        self._check_for_sqlalchemy_models(event.model_dump())
+        """发布事件到队列"""
+        self._check_for_sqlalchemy_models(event.model_dump())  # 避免线程安全问题
         self._publish(event, pub_from)
 
     @abstractmethod
@@ -111,10 +105,7 @@ class AppQueueManager:
 
     @classmethod
     def set_stop_flag(cls, task_id: str, invoke_from: InvokeFrom, user_id: str) -> None:
-        """
-        Set task stop flag
-        :return:
-        """
+        """通过Redis设置任务停止标志"""
         result: Optional[Any] = redis_client.get(cls._generate_task_belong_cache_key(task_id))
         if result is None:
             return
@@ -124,7 +115,7 @@ class AppQueueManager:
             return
 
         stopped_cache_key = cls._generate_stopped_cache_key(task_id)
-        redis_client.setex(stopped_cache_key, 600, 1)
+        redis_client.setex(stopped_cache_key, 600, 1)  # 10分钟过期
 
     def _is_stopped(self) -> bool:
         """
@@ -157,7 +148,7 @@ class AppQueueManager:
         return f"generate_task_stopped:{task_id}"
 
     def _check_for_sqlalchemy_models(self, data: Any):
-        # from entity to dict or list
+        """递归检查数据中是否包含SQLAlchemy模型实例，防止跨线程传递导致的线程安全问题"""
         if isinstance(data, dict):
             for key, value in data.items():
                 self._check_for_sqlalchemy_models(value)
@@ -165,6 +156,7 @@ class AppQueueManager:
             for item in data:
                 self._check_for_sqlalchemy_models(item)
         else:
+            # 检测SQLAlchemy模型实例
             if isinstance(data, DeclarativeMeta) or hasattr(data, "_sa_instance_state"):
                 raise TypeError(
                     "Critical Error: Passing SQLAlchemy Model instances that cause thread safety issues is not allowed."

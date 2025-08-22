@@ -12,6 +12,18 @@ from core.tools.errors import ToolProviderCredentialValidationError
 
 
 class ToolProviderController(ABC):
+    """
+    工具提供者控制器基类 - 管理特定类型工具提供者的抽象控制器
+    
+    这个类是工具提供者管理的核心抽象：
+    1. 凭据管理：验证和格式化工具提供者的认证凭据
+    2. 工具获取：提供具体工具实例的获取接口
+    3. 模式定义：定义工具提供者的类型(内置/API/插件/工作流等)
+    4. 配置模式：管理工具提供者的配置模式和验证规则
+    
+    具体的工具提供者实现(如BuiltinToolProviderController、ApiToolProviderController等)
+    继承此类并实现具体的工具加载和管理逻辑
+    """
     def __init__(self, entity: ToolProviderEntity) -> None:
         self.entity = entity
 

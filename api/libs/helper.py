@@ -204,13 +204,21 @@ def generate_text_hash(text: str) -> str:
 
 
 def compact_generate_response(response: Union[Mapping, Generator, RateLimitGenerator]) -> Response:
+    """
+    统一处理流式和非流式响应
+    - 非streaming: 返回完整的JSON响应(blocking模式)
+    - streaming: 返回SSE事件流(实时推送)
+    """
     if isinstance(response, dict):
+        # 非streaming模式: 返回完整JSON响应
         return Response(response=json.dumps(jsonable_encoder(response)), status=200, mimetype="application/json")
     else:
-
+        # streaming模式: 返回SSE事件流
         def generate() -> Generator:
-            yield from response
+            # 每当有新事件到达，Generator就会yield出去，触发Flask的stream_with_context推送
+            yield from response  # 从队列管理器的listen()获取事件流
 
+        # SSE: Server-Sent Events，浏览器原生支持的实时推送技术
         return Response(stream_with_context(generate()), status=200, mimetype="text/event-stream")
 
 
@@ -346,29 +354,39 @@ class TokenManager:
 
 
 class RateLimiter:
+    """基于Redis Sorted Set的滑动窗口限流器 - 用于日频率/时频率限制"""
     def __init__(self, prefix: str, max_attempts: int, time_window: int):
-        self.prefix = prefix
-        self.max_attempts = max_attempts
-        self.time_window = time_window
+        self.prefix = prefix                # Redis key前缀
+        self.max_attempts = max_attempts    # 时间窗口内最大请求数
+        self.time_window = time_window      # 时间窗口大小(秒)，如86400=24小时
 
     def _get_key(self, email: str) -> str:
+        """生成Redis key：前缀:用户标识"""
         return f"{self.prefix}:{email}"
 
     def is_rate_limited(self, email: str) -> bool:
+        """检查是否达到频率限制"""
         key = self._get_key(email)
         current_time = int(time.time())
         window_start_time = current_time - self.time_window
 
+        # 清理时间窗口外的过期记录（滑动窗口核心机制）
         redis_client.zremrangebyscore(key, "-inf", window_start_time)
+        
+        # 统计当前时间窗口内的请求数
         attempts = redis_client.zcard(key)
 
+        # 检查是否超过限制
         if attempts and int(attempts) >= self.max_attempts:
             return True
         return False
 
     def increment_rate_limit(self, email: str):
+        """增加请求计数：在Sorted Set中添加当前时间戳"""
         key = self._get_key(email)
         current_time = int(time.time())
 
+        # 使用时间戳作为score和member，记录请求时间
         redis_client.zadd(key, {current_time: current_time})
+        # 设置过期时间为时间窗口的2倍，防止内存泄漏
         redis_client.expire(key, self.time_window * 2)

@@ -843,6 +843,10 @@ class TraceQueueManager:
             self.start_timer()
 
     def add_trace_task(self, trace_task: TraceTask):
+        """
+        添加追踪任务到队列 - 异步收集应用执行追踪数据
+        将LLM调用、工具使用、检索等执行数据加入全局队列，避免阻塞主业务流程
+        """
         global trace_manager_timer, trace_manager_queue
         try:
             if self.trace_instance:
@@ -854,6 +858,10 @@ class TraceQueueManager:
             self.start_timer()
 
     def collect_tasks(self):
+        """
+        批量收集队列中的追踪任务 - 从全局队列中取出待处理的追踪数据
+        按批次大小收集任务，提高处理效率，避免频繁的单个任务处理
+        """
         global trace_manager_queue
         tasks: list[TraceTask] = []
         while len(tasks) < trace_manager_batch_size and not trace_manager_queue.empty():
@@ -879,21 +887,28 @@ class TraceQueueManager:
             trace_manager_timer.start()
 
     def send_to_celery(self, tasks: list[TraceTask]):
+        """
+        发送追踪任务到Celery异步处理 - 将追踪数据持久化并异步处理
+        1. 执行追踪任务获取数据 2. 保存到存储系统 3. 通过Celery队列异步处理
+        """
         with self.flask_app.app_context():
             for task in tasks:
                 if task.app_id is None:
                     continue
                 file_id = uuid4().hex
+                # 执行追踪任务，获取具体的追踪数据（性能指标、token使用等）
                 trace_info = task.execute()
                 task_data = TaskData(
                     app_id=task.app_id,
                     trace_info_type=type(trace_info).__name__,
                     trace_info=trace_info.model_dump() if trace_info else None,
                 )
+                # 将追踪数据保存到文件系统，便于后续批量处理和分析
                 file_path = f"{OPS_FILE_PATH}{task.app_id}/{file_id}.json"
                 storage.save(file_path, task_data.model_dump_json().encode("utf-8"))
                 file_info = {
                     "file_id": file_id,
                     "app_id": task.app_id,
                 }
+                # 通过Celery异步处理追踪数据（写入数据库、计算统计等）
                 process_trace_tasks.delay(file_info)

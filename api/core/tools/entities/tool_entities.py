@@ -42,7 +42,15 @@ class ToolLabelEnum(Enum):
 
 class ToolProviderType(enum.StrEnum):
     """
-    Enum class for tool provider
+    工具提供者类型枚举 - 定义 Dify 支持的所有工具提供者类型
+    
+    PLUGIN: 插件工具 - 通过插件系统扩展的第三方工具
+    BUILT_IN: 内置工具 - Dify 核心提供的基础工具(时间、计算器等)
+    WORKFLOW: 工作流工具 - 将复杂工作流封装为可复用的工具
+    API: API工具 - 基于OpenAPI/Swagger规范的第三方服务接口
+    APP: 应用工具 - 其他Dify应用作为工具使用
+    DATASET_RETRIEVAL: 数据集检索工具 - 专门用于知识库检索的工具
+    MCP: Model Context Protocol工具 - 支持MCP协议的工具
     """
 
     PLUGIN = "plugin"

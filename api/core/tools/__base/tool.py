@@ -17,7 +17,13 @@ from core.tools.entities.tool_entities import (
 
 class Tool(ABC):
     """
-    The base class of a tool
+    工具基类 - 所有工具的抽象基础类
+    
+    这是 Dify 工具系统的核心抽象，定义了工具的基本接口和行为：
+    1. 工具实体(entity)：包含工具的元数据、参数定义等
+    2. 运行时(runtime)：包含租户ID、凭据、运行时参数等执行上下文
+    3. 调用接口(invoke)：统一的工具调用入口，支持流式和批量响应
+    4. 参数转换：自动将输入参数转换为正确的类型
     """
 
     def __init__(self, entity: ToolEntity, runtime: ToolRuntime) -> None:

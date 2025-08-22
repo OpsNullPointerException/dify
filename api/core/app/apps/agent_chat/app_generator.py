@@ -83,9 +83,11 @@ class AgentChatAppGenerator(MessageBasedAppGenerator):
         :param invoke_from: invoke from source
         :param streaming: is stream
         """
+        # Agent模式强制流式响应，保证实时交互体验
         if not streaming:
             raise ValueError("Agent Chat App does not support blocking mode")
 
+        # 验证必要参数
         if not args.get("query"):
             raise ValueError("query is required")
 
@@ -93,37 +95,39 @@ class AgentChatAppGenerator(MessageBasedAppGenerator):
         if not isinstance(query, str):
             raise ValueError("query must be a string")
 
+        # 清理query中的空字符，NULL字符
         query = query.replace("\x00", "")
         inputs = args["inputs"]
 
         extras = {"auto_generate_conversation_name": args.get("auto_generate_name", True)}
 
-        # get conversation
+        # 获取或创建对话实例
         conversation = None
         conversation_id = args.get("conversation_id")
         if conversation_id:
             conversation = ConversationService.get_conversation(
                 app_model=app_model, conversation_id=conversation_id, user=user
             )
-        # get app model config
+            
+        # 获取应用模型配置
         app_model_config = self._get_app_model_config(app_model=app_model, conversation=conversation)
 
-        # validate override model config
+        # 处理调试模式的配置覆盖
         override_model_config_dict = None
         if args.get("model_config"):
             if invoke_from != InvokeFrom.DEBUGGER:
                 raise ValueError("Only in App debug mode can override model config")
 
-            # validate config
+            # 验证覆盖配置的有效性
             override_model_config_dict = AgentChatAppConfigManager.config_validate(
                 tenant_id=app_model.tenant_id,
                 config=args["model_config"],
             )
 
-            # always enable retriever resource in debugger mode
+            # 调试模式下总是启用检索资源
             override_model_config_dict["retriever_resource"] = {"enabled": True}
 
-        # parse files
+        # 解析文件上传（支持多模态输入）
         # TODO(QuantumGhost): Move file parsing logic to the API controller layer
         # for better separation of concerns.
         #
@@ -132,6 +136,7 @@ class AgentChatAppGenerator(MessageBasedAppGenerator):
         files = args.get("files") or []
         file_extra_config = FileUploadConfigManager.convert(override_model_config_dict or app_model_config.to_dict())
         if file_extra_config:
+            # 根据配置构建文件对象
             file_objs = file_factory.build_from_mappings(
                 mappings=files,
                 tenant_id=app_model.tenant_id,
@@ -140,7 +145,7 @@ class AgentChatAppGenerator(MessageBasedAppGenerator):
         else:
             file_objs = []
 
-        # convert to app config
+        # 转换为应用配置对象
         app_config = AgentChatAppConfigManager.get_app_config(
             app_model=app_model,
             app_model_config=app_model_config,
@@ -148,34 +153,34 @@ class AgentChatAppGenerator(MessageBasedAppGenerator):
             override_config_dict=override_model_config_dict,
         )
 
-        # get tracing instance
+        # 初始化追踪管理器（用于性能监控和调试）
         trace_manager = TraceQueueManager(app_model.id, user.id if isinstance(user, Account) else user.session_id)
 
-        # init application generate entity
+        # 创建应用生成实体，包含完整的执行上下文
         application_generate_entity = AgentChatAppGenerateEntity(
-            task_id=str(uuid.uuid4()),
-            app_config=app_config,
-            model_conf=ModelConfigConverter.convert(app_config),
-            file_upload_config=file_extra_config,
+            task_id=str(uuid.uuid4()),              # 全局唯一任务ID
+            app_config=app_config,                  # 应用配置
+            model_conf=ModelConfigConverter.convert(app_config),  # 模型配置
+            file_upload_config=file_extra_config,   # 文件上传配置
             conversation_id=conversation.id if conversation else None,
-            inputs=self._prepare_user_inputs(
+            inputs=self._prepare_user_inputs(       # 处理用户输入变量
                 user_inputs=inputs, variables=app_config.variables, tenant_id=app_model.tenant_id
             ),
-            query=query,
-            files=list(file_objs),
+            query=query,                            # 用户查询
+            files=list(file_objs),                  # 文件对象列表
             parent_message_id=args.get("parent_message_id") if invoke_from != InvokeFrom.SERVICE_API else UUID_NIL,
             user_id=user.id,
             stream=streaming,
             invoke_from=invoke_from,
             extras=extras,
-            call_depth=0,
+            call_depth=0,                           # 递归调用深度
             trace_manager=trace_manager,
         )
 
-        # init generate records
+        # 初始化数据库记录（conversation和message）
         (conversation, message) = self._init_generate_records(application_generate_entity, conversation)
 
-        # init queue manager
+        # 初始化队列管理器，用于实时事件流传输
         queue_manager = MessageBasedAppQueueManager(
             task_id=application_generate_entity.task_id,
             user_id=application_generate_entity.user_id,
@@ -185,24 +190,26 @@ class AgentChatAppGenerator(MessageBasedAppGenerator):
             message_id=message.id,
         )
 
-        # new thread with request context and contextvars
+        # 复制当前上下文变量，确保线程间上下文隔离
         context = contextvars.copy_context()
 
+        # 创建工作线程执行智能体推理
         worker_thread = threading.Thread(
             target=self._generate_worker,
             kwargs={
-                "flask_app": current_app._get_current_object(),  # type: ignore
-                "context": context,
+                "flask_app": current_app._get_current_object(),  # Flask应用实例
+                "context": context,                              # 上下文变量
                 "application_generate_entity": application_generate_entity,
-                "queue_manager": queue_manager,
+                "queue_manager": queue_manager,                  # 队列管理器
                 "conversation_id": conversation.id,
                 "message_id": message.id,
             },
         )
 
+        # 启动异步执行线程
         worker_thread.start()
 
-        # return response or stream generator
+        # 处理响应并返回流式生成器
         response = self._handle_response(
             application_generate_entity=application_generate_entity,
             queue_manager=queue_manager,
@@ -211,7 +218,8 @@ class AgentChatAppGenerator(MessageBasedAppGenerator):
             user=user,
             stream=streaming,
         )
-        # FIXME: Type hinting issue here, ignore it for now, will fix it later
+        
+        # 转换响应格式并返回
         return AgentChatAppGenerateResponseConverter.convert(response=response, invoke_from=invoke_from)  # type: ignore
 
     def _generate_worker(
@@ -233,35 +241,42 @@ class AgentChatAppGenerator(MessageBasedAppGenerator):
         :return:
         """
 
+        # 保持Flask上下文和上下文变量
         with preserve_flask_contexts(flask_app, context_vars=context):
             try:
-                # get conversation and message
+                # 重新获取对话和消息实例（跨线程数据库访问）
                 conversation = self._get_conversation(conversation_id)
                 message = self._get_message(message_id)
 
-                # chatbot app
+                # 创建并运行智能体执行器
                 runner = AgentChatAppRunner()
                 runner.run(
                     application_generate_entity=application_generate_entity,
-                    queue_manager=queue_manager,
+                    queue_manager=queue_manager,              # 通过队列发布实时事件
                     conversation=conversation,
                     message=message,
                 )
             except GenerateTaskStoppedError:
+                # 任务被用户手动停止，正常结束
                 pass
             except InvokeAuthorizationError:
+                # API密钥错误，发布授权错误事件
                 queue_manager.publish_error(
                     InvokeAuthorizationError("Incorrect API key provided"), PublishFrom.APPLICATION_MANAGER
                 )
             except ValidationError as e:
+                # 配置验证失败
                 logger.exception("Validation Error when generating")
                 queue_manager.publish_error(e, PublishFrom.APPLICATION_MANAGER)
             except ValueError as e:
+                # 参数错误
                 if dify_config.DEBUG:
                     logger.exception("Error when generating")
                 queue_manager.publish_error(e, PublishFrom.APPLICATION_MANAGER)
             except Exception as e:
+                # 未知错误，记录详细日志
                 logger.exception("Unknown Error when generating")
                 queue_manager.publish_error(e, PublishFrom.APPLICATION_MANAGER)
             finally:
+                # 确保数据库连接正确关闭
                 db.session.close()

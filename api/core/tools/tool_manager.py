@@ -66,6 +66,24 @@ logger = logging.getLogger(__name__)
 
 
 class ToolManager:
+    """
+    工具管理器 - Dify 工具系统的核心管理类
+    
+    这是整个工具系统的统一管理入口，负责：
+    1. 工具提供者注册与发现：管理内置、API、插件、工作流、MCP等各类工具提供者
+    2. 工具运行时创建：为不同场景(Agent、Workflow)创建合适的工具运行时实例
+    3. 凭据管理：处理工具的认证凭据，支持加密存储和OAuth流程
+    4. 缓存机制：缓存工具提供者实例，提高性能
+    5. 图标和标签管理：管理工具的视觉元素和分类标签
+    
+    支持的工具类型：
+    - BUILT_IN: 内置工具(如时间、计算器等)
+    - API: 基于OpenAPI规范的第三方API工具
+    - PLUGIN: 插件系统提供的工具
+    - WORKFLOW: 将工作流封装为工具
+    - MCP: Model Context Protocol工具
+    - DATASET_RETRIEVAL: 数据集检索工具
+    """
     _builtin_provider_lock = Lock()
     _hardcoded_providers: dict[str, BuiltinToolProviderController] = {}
     _builtin_providers_loaded = False

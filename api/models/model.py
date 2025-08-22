@@ -42,11 +42,12 @@ class DifySetup(Base):
 
 
 class AppMode(StrEnum):
-    COMPLETION = "completion"
-    WORKFLOW = "workflow"
-    CHAT = "chat"
-    ADVANCED_CHAT = "advanced-chat"
-    AGENT_CHAT = "agent-chat"
+    """应用模式枚举 - 定义Dify支持的5种应用类型"""
+    COMPLETION = "completion"        # 文本生成模式：一问一答，无对话历史
+    WORKFLOW = "workflow"           # 工作流模式：纯工作流执行，无对话界面
+    CHAT = "chat"                   # 基础对话模式：简单配置，有对话历史
+    ADVANCED_CHAT = "advanced-chat" # 高级对话模式：基于工作流的复杂对话
+    AGENT_CHAT = "agent-chat"       # 智能体模式：支持Function Call工具调用
 
     @classmethod
     def value_of(cls, value: str) -> "AppMode":

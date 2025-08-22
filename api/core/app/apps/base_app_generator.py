@@ -155,19 +155,18 @@ class BaseAppGenerator:
     @classmethod
     def convert_to_event_stream(cls, generator: Union[Mapping, Generator[Mapping | str, None, None]]):
         """
-        Convert messages into event stream
+        将队列管理器的生成器转换为SSE格式的事件流
+        SSE格式: "data: {json}\n\n" 或 "event: {event_name}\n\n"
         """
         if isinstance(generator, dict):
             return generator
         else:
-
             def gen():
-                for message in generator:
+                for message in generator:  # 从队列管理器的listen()获取消息
                     if isinstance(message, Mapping | dict):
-                        yield f"data: {json.dumps(message)}\n\n"
+                        yield f"data: {json.dumps(message)}\n\n"  # SSE数据格式: data: + JSON + 双换行
                     else:
-                        yield f"event: {message}\n\n"
-
+                        yield f"event: {message}\n\n"  # SSE事件格式: event: + 事件名 + 双换行
             return gen()
 
     @final

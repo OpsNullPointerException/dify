@@ -13,6 +13,8 @@ from core.app.entities.queue_entities import (
 
 
 class MessageBasedAppQueueManager(AppQueueManager):
+    """基于消息的应用队列管理器，用于Chat/Agent等应用的实时事件流管理"""
+    
     def __init__(
         self, task_id: str, user_id: str, invoke_from: InvokeFrom, conversation_id: str, app_mode: str, message_id: str
     ) -> None:
@@ -32,12 +34,7 @@ class MessageBasedAppQueueManager(AppQueueManager):
         )
 
     def _publish(self, event: AppQueueEvent, pub_from: PublishFrom) -> None:
-        """
-        Publish event to queue
-        :param event:
-        :param pub_from:
-        :return:
-        """
+        """发布事件到队列供前端实时消费"""
         message = MessageQueueMessage(
             task_id=self._task_id,
             message_id=self._message_id,
@@ -48,6 +45,7 @@ class MessageBasedAppQueueManager(AppQueueManager):
 
         self._q.put(message)
 
+        # 如果是结束类事件，停止监听
         if isinstance(
             event, QueueStopEvent | QueueErrorEvent | QueueMessageEndEvent | QueueAdvancedChatMessageEndEvent
         ):

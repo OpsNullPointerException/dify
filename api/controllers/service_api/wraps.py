@@ -39,39 +39,54 @@ class FetchUserArg(BaseModel):
 
 
 def validate_app_token(view: Optional[Callable] = None, *, fetch_user_arg: Optional[FetchUserArg] = None):
+    """
+    应用Token验证装饰器：用于API调用的身份验证和权限检查
+    
+    功能：
+    1. 验证API Token的有效性
+    2. 检查应用状态和权限
+    3. 验证租户状态
+    4. 获取并注入用户信息
+    """
     def decorator(view_func):
         @wraps(view_func)
         def decorated_view(*args, **kwargs):
+            # 第一步：验证API Token并获取Token对象
             api_token = validate_and_get_api_token("app")
 
+            # 第二步：验证应用状态
             app_model = db.session.query(App).where(App.id == api_token.app_id).first()
             if not app_model:
                 raise Forbidden("The app no longer exists.")
 
+            # 检查应用是否正常状态
             if app_model.status != "normal":
                 raise Forbidden("The app's status is abnormal.")
 
+            # 检查应用是否启用API服务
             if not app_model.enable_api:
                 raise Forbidden("The app's API service has been disabled.")
 
+            # 第三步：验证租户状态
             tenant = db.session.query(Tenant).where(Tenant.id == app_model.tenant_id).first()
             if tenant is None:
                 raise ValueError("Tenant does not exist.")
             if tenant.status == TenantStatus.ARCHIVE:
                 raise Forbidden("The workspace's status is archived.")
 
+            # 第四步：获取租户所有者信息并设置登录上下文
             tenant_account_join = (
                 db.session.query(Tenant, TenantAccountJoin)
                 .where(Tenant.id == api_token.tenant_id)
                 .where(TenantAccountJoin.tenant_id == Tenant.id)
-                .where(TenantAccountJoin.role.in_(["owner"]))
+                .where(TenantAccountJoin.role.in_(["owner"]))  # 只查询所有者角色
                 .where(Tenant.status == TenantStatus.NORMAL)
                 .one_or_none()
             )  # TODO: only owner information is required, so only one is returned.
             if tenant_account_join:
                 tenant, ta = tenant_account_join
                 account = db.session.query(Account).where(Account.id == ta.account_id).first()
-                # Login admin
+                # 设置管理员登录上下文
                 if account:
                     account.current_tenant = tenant
                     current_app.login_manager._update_request_context_with_user(account)  # type: ignore
@@ -81,32 +96,38 @@ def validate_app_token(view: Optional[Callable] = None, *, fetch_user_arg: Optio
             else:
                 raise Unauthorized("Tenant does not exist.")
 
+            # 第五步：将验证通过的应用对象注入到请求参数中
             kwargs["app_model"] = app_model
 
+            # 第六步：处理终端用户信息（如果需要）
             if fetch_user_arg:
+                # 根据配置从不同位置获取用户ID
                 if fetch_user_arg.fetch_from == WhereisUserArg.QUERY:
-                    user_id = request.args.get("user")
+                    user_id = request.args.get("user")  # 从URL参数获取
                 elif fetch_user_arg.fetch_from == WhereisUserArg.JSON:
-                    user_id = request.get_json().get("user")
+                    user_id = request.get_json().get("user")  # 从JSON请求体获取
                 elif fetch_user_arg.fetch_from == WhereisUserArg.FORM:
-                    user_id = request.form.get("user")
+                    user_id = request.form.get("user")  # 从表单数据获取
                 else:
-                    # use default-user
+                    # 使用默认用户
                     user_id = None
 
+                # 检查是否必须提供用户ID
                 if not user_id and fetch_user_arg.required:
                     raise ValueError("Arg user must be provided.")
 
                 if user_id:
                     user_id = str(user_id)
 
+                # 创建或更新终端用户，并注入到请求参数中
                 end_user = create_or_update_end_user_for_user_id(app_model, user_id)
                 kwargs["end_user"] = end_user
 
-                # Set EndUser as current logged-in user for flask_login.current_user
+                # 设置终端用户为当前登录用户（用于flask_login.current_user）
                 current_app.login_manager._update_request_context_with_user(end_user)  # type: ignore
                 user_logged_in.send(current_app._get_current_object(), user=end_user)  # type: ignore
 
+            # 最后：调用原始视图函数，传入验证后的参数
             return view_func(*args, **kwargs)
 
         return decorated_view

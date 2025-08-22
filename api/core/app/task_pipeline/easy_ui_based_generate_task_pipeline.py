@@ -118,16 +118,23 @@ class EasyUIBasedGenerateTaskPipeline(BasedGenerateTaskPipeline):
         CompletionAppBlockingResponse,
         Generator[Union[ChatbotAppStreamResponse, CompletionAppStreamResponse], None, None],
     ]:
+        """
+        主处理入口 - 启动任务处理流程
+        根据stream参数决定返回blocking响应还是streaming响应
+        """
         if self._application_generate_entity.app_config.app_mode != AppMode.COMPLETION:
-            # start generate conversation name thread
+            # 启动对话标题生成线程（异步生成对话名称）
             self._conversation_name_generate_thread = self._message_cycle_manager.generate_conversation_name(
                 conversation_id=self._conversation_id, query=self._application_generate_entity.query or ""
             )
 
+        # 创建流式响应生成器，包装队列消费逻辑
         generator = self._wrapper_process_stream_response(trace_manager=self._application_generate_entity.trace_manager)
         if self._stream:
+            # 流式模式：返回Generator供前端SSE消费
             return self._to_stream_response(generator)
         else:
+            # 阻塞模式：等待完整响应后一次性返回
             return self._to_blocking_response(generator)
 
     def _to_blocking_response(
@@ -255,20 +262,23 @@ class EasyUIBasedGenerateTaskPipeline(BasedGenerateTaskPipeline):
         self, publisher: Optional[AppGeneratorTTSPublisher], trace_manager: Optional[TraceQueueManager] = None
     ) -> Generator[StreamResponse, None, None]:
         """
-        Process stream response.
-        :return:
+        处理流式响应 - 核心队列消费逻辑
+        从队列管理器消费事件，转换为前端可用的流式响应数据
         """
+        # 核心：从队列管理器消费事件流，这里是队列的消费端
         for message in self.queue_manager.listen():
             if publisher:
                 publisher.publish(message)
             event = message.event
 
+            # 处理错误事件：立即返回错误并终止流
             if isinstance(event, QueueErrorEvent):
                 with Session(db.engine) as session:
                     err = self._handle_error(event=event, session=session, message_id=self._message_id)
                     session.commit()
                 yield self._error_to_stream_response(err)
                 break
+            # 处理任务结束事件：保存消息并返回结束标志
             elif isinstance(event, QueueStopEvent | QueueMessageEndEvent):
                 if isinstance(event, QueueMessageEndEvent):
                     if event.llm_result:
@@ -276,7 +286,7 @@ class EasyUIBasedGenerateTaskPipeline(BasedGenerateTaskPipeline):
                 else:
                     self._handle_stop(event)
 
-                # handle output moderation
+                # 处理输出内容审核
                 output_moderation_answer = self._handle_output_moderation_when_task_finished(
                     cast(str, self._task_state.llm_result.message.content)
                 )
@@ -287,30 +297,36 @@ class EasyUIBasedGenerateTaskPipeline(BasedGenerateTaskPipeline):
                     )
 
                 with Session(db.engine) as session:
-                    # Save message
+                    # 保存消息到数据库，并添加追踪任务
                     self._save_message(session=session, trace_manager=trace_manager)
                     session.commit()
                 message_end_resp = self._message_end_to_stream_response()
                 yield message_end_resp
+            # 处理知识库检索资源事件
             elif isinstance(event, QueueRetrieverResourcesEvent):
                 self._message_cycle_manager.handle_retriever_resources(event)
+            # 处理注释回复事件
             elif isinstance(event, QueueAnnotationReplyEvent):
                 annotation = self._message_cycle_manager.handle_annotation_reply(event)
                 if annotation:
                     self._task_state.llm_result.message.content = annotation.content
+            # 处理Agent思考过程事件
             elif isinstance(event, QueueAgentThoughtEvent):
                 agent_thought_response = self._agent_thought_to_stream_response(event)
                 if agent_thought_response is not None:
                     yield agent_thought_response
+            # 处理消息文件事件
             elif isinstance(event, QueueMessageFileEvent):
                 response = self._message_cycle_manager.message_file_to_stream_response(event)
                 if response:
                     yield response
+            # 处理LLM文本块事件：实时流式输出的核心逻辑
             elif isinstance(event, QueueLLMChunkEvent | QueueAgentMessageEvent):
                 chunk = event.chunk
                 delta_text = chunk.delta.message.content
                 if delta_text is None:
                     continue
+                # 处理复合内容类型（文本+图片等）
                 if isinstance(chunk.delta.message.content, list):
                     delta_text = ""
                     for content in chunk.delta.message.content:
@@ -332,15 +348,17 @@ class EasyUIBasedGenerateTaskPipeline(BasedGenerateTaskPipeline):
                 if not self._task_state.llm_result.prompt_messages:
                     self._task_state.llm_result.prompt_messages = chunk.prompt_messages
 
-                # handle output moderation chunk
+                # 处理输出内容审核（实时过滤）
                 should_direct_answer = self._handle_output_moderation_chunk(cast(str, delta_text))
                 if should_direct_answer:
                     continue
 
+                # 累积文本内容
                 current_content = cast(str, self._task_state.llm_result.message.content)
                 current_content += cast(str, delta_text)
                 self._task_state.llm_result.message.content = current_content
 
+                # 转换为流式响应并实时推送给前端
                 if isinstance(event, QueueLLMChunkEvent):
                     yield self._message_cycle_manager.message_to_stream_response(
                         answer=cast(str, delta_text),
@@ -351,8 +369,10 @@ class EasyUIBasedGenerateTaskPipeline(BasedGenerateTaskPipeline):
                         answer=cast(str, delta_text),
                         message_id=self._message_id,
                     )
+            # 处理消息替换事件
             elif isinstance(event, QueueMessageReplaceEvent):
                 yield self._message_cycle_manager.message_replace_to_stream_response(answer=event.text)
+            # 处理心跳事件：保持连接活跃
             elif isinstance(event, QueuePingEvent):
                 yield self._ping_stream_response()
             else:
